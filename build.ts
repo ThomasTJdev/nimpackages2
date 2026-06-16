@@ -19,6 +19,7 @@ interface Package {
   u: string;   // url
   d: string;   // description
   t: string[]; // tags
+  o: string;   // owner / author (extracted from repo URL)
   v: string;   // latest version tag (empty when unknown)
   a: string;   // last pushed/updated ISO date (empty when unknown)
 }
@@ -208,12 +209,13 @@ function buildHtml(packages: Package[], css: string, builtAt: string, trackingSc
   // Last 10 entries in packages.json = newest additions to the Nim registry
   const newest = packages.slice(-10);
 
-  // Minify the package array slightly — drop empty strings for v/a to save bytes
+  // Minify the package array slightly — drop empty strings for optional fields to save bytes
   const slim = packages.map((p) => ({
     n: p.n,
     u: p.u,
     d: p.d,
     t: p.t,
+    ...(p.o ? { o: p.o } : {}),
     ...(p.v ? { v: p.v } : {}),
     ...(p.a ? { a: p.a } : {}),
   }));
@@ -261,7 +263,7 @@ function buildHtml(packages: Package[], css: string, builtAt: string, trackingSc
           type="text"
           id="q"
           class="search-input"
-          placeholder="Search packages (e.g., 'clap', 'http', 'json')…"
+          placeholder="Search packages (e.g., 'http', 'http client', 'json parser')…"
           autocomplete="off"
           autofocus
         >
@@ -340,17 +342,44 @@ function buildHtml(packages: Package[], css: string, builtAt: string, trackingSc
       : '<p class="no-results"><span>No packages found. Try a different search term.</span></p>';
   }
 
+  /**
+   * Return a priority score for a single token against one package field group.
+   * Higher score = more prominent match. Zero means no match.
+   *   4 — name
+   *   3 — description
+   *   2 — tags
+   *   1 — author / owner
+   */
+  function tokenScore(p, token) {
+    if (p.n.toLowerCase().includes(token)) return 4;
+    if (p.d && p.d.toLowerCase().includes(token)) return 3;
+    if (p.t && p.t.some(t => t.toLowerCase().includes(token))) return 2;
+    if (p.o && p.o.toLowerCase().includes(token)) return 1;
+    return 0;
+  }
+
   function doSearch() {
     const q = document.getElementById('q').value.trim().toLowerCase();
     if (!q) {
       render(NEWEST, 'Newest Packages', '');
       return;
     }
-    const results = P.filter(p =>
-      p.n.toLowerCase().includes(q) ||
-      (p.d && p.d.toLowerCase().includes(q)) ||
-      (p.t && p.t.some(t => t.toLowerCase().includes(q)))
-    );
+
+    // Split on whitespace so e.g. "http json" becomes two required tokens (AND logic)
+    const tokens = q.split(/\\s+/).filter(Boolean);
+
+    const scored = [];
+    for (const p of P) {
+      const scores = tokens.map(token => tokenScore(p, token));
+      // Every token must match at least one field — if any token scores 0, skip the package
+      if (scores.some(s => s === 0)) continue;
+      // Sum scores: name matches (4) outrank description (3) > tags (2) > author (1),
+      // and packages matching more tokens in high-priority fields naturally rank higher
+      scored.push({ p, score: scores.reduce((a, b) => a + b, 0) });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    const results = scored.map(s => s.p);
     render(results, 'Search Results', results.length + ' package' + (results.length === 1 ? '' : 's') + ' found');
   }
 
@@ -412,24 +441,33 @@ async function main() {
       u: r.url!,
       d: r.description ?? "",
       t: r.tags ?? [],
+      // Extract owner from the repo URL so it is searchable (e.g. "ThomasTJdev")
+      o: parseRepoUrl(r.url!)?.owner ?? "",
       v: "",
       a: "",
     }));
 
   // --- Phase 2: enrich with repo info ---
+  // Set SKIP_ENRICHMENT=1 (via `npm run build:dev`) to skip all API calls during local development
+  const skipEnrichment = process.env.SKIP_ENRICHMENT === "1";
   console.log("\n[2/3] Enriching with repository info…");
+  if (skipEnrichment) {
+    console.log("  Skipping enrichment (SKIP_ENRICHMENT=1)");
+  }
 
   // Separate by platform
   const githubPkgs: Array<Package & { owner: string; repo: string; alias: string }> = [];
   const restPkgs: Array<{ pkg: Package; owner: string; repo: string; platform: "gitlab" | "codeberg" }> = [];
 
-  for (const pkg of packages) {
-    const info = parseRepoUrl(pkg.u);
-    if (!info) continue;
-    if (info.platform === "github" && githubToken) {
-      githubPkgs.push({ ...pkg, owner: info.owner, repo: info.repo, alias: toAlias(`${info.owner}_${info.repo}`) });
-    } else if (info.platform === "gitlab" || info.platform === "codeberg") {
-      restPkgs.push({ pkg, owner: info.owner, repo: info.repo, platform: info.platform });
+  if (!skipEnrichment) {
+    for (const pkg of packages) {
+      const info = parseRepoUrl(pkg.u);
+      if (!info) continue;
+      if (info.platform === "github" && githubToken) {
+        githubPkgs.push({ ...pkg, owner: info.owner, repo: info.repo, alias: toAlias(`${info.owner}_${info.repo}`) });
+      } else if (info.platform === "gitlab" || info.platform === "codeberg") {
+        restPkgs.push({ pkg, owner: info.owner, repo: info.repo, platform: info.platform });
+      }
     }
   }
 

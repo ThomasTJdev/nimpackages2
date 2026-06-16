@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "tsx build.ts"
+    "build": "tsx build.ts",
+    "build:dev": "SKIP_ENRICHMENT=1 tsx build.ts"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
